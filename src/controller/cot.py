@@ -388,59 +388,38 @@ class COTController:
 
 
 
-    # This setup redis to ensure data is coherent for database and redis
+    # This warms the cot_ttf:* Redis cache from Postgres on startup.
     async def setup_redis(self):
-        """Idempotent Redis warm-up: if "cot_status" isn't already set to 1,
-        either populate Redis from scratch (no cot_ttf* keys yet) or clear
-        and repopulate it (stale keys present), then mark "cot_status" = 1
-        so subsequent calls skip straight to the "already updated" log line.
+        """Warm the `cot_ttf:*` Redis cache from Postgres when it is empty.
+
+        Idempotent, and gated on the ACTUAL presence of keys (a SCAN) rather
+        than a sticky "done" flag - so it also self-heals after the keys
+        expire (60-week TTL), get evicted, or Redis is flushed. It never
+        deletes anything: insert_cot_redis overwrites by key, and old rows age
+        out on their own TTL.
+
+        Never raises - a cold cache should not take down API startup. The
+        weekly `cot_update` cron and the lazy per-instrument fetches recover
+        whatever this misses.
         """
         try:
-            cot_status =  await  self.aioredis.get("cot_status")
+            # SCAN (non-blocking), stop at the first hit - we only need to
+            # know whether ANY cot_ttf key exists.
+            async for _ in self.aioredis.scan_iter(match="cot_ttf:*", count=1):
+                logger.info("cot_ttf cache already populated - skipping warm-up")
+                return
 
-            # Check if the status updated. `cot_status` is None on a cold
-            # start (the key has never been written) - int(None) would raise
-            # TypeError, so treat "missing" the same as "not yet updated".
-            if cot_status is None or int(cot_status) != 1:
-                check_cot =   self.redis.keys("cot_ttf*")
-             
+            data_list = await self.cot.get_all_last_year_cot()
+            if not data_list:
+                logger.warning("setup_redis: Postgres returned no COT rows to cache")
+                return
 
-                if check_cot ==[]:
-                    data_list = await self.cot.get_all_last_year_cot()
-
-                    # If batch data is not returned then stop operations
-                    if not data_list:
-                        logger.info("data list is empty")
-                        return
-
-                    # Insert redis records
-                    await self.insert_cot_redis(data_list)
-
-                else:
-                    clear_cache = await self.aioredis.delete(*check_cot)
-
-                   
-                    # Ensure the all data in cot_ttf is deleted
-                    if clear_cache != 0:
-
-                        data_list = await self.cot.get_all_last_year_cot()
-
-                        # If batch data is not returned then stop operations
-                        if not data_list:
-                            logger.info("data list is empty")
-                            return
-
-                        # Insert redis records
-                        await self.insert_cot_redis(data_list)
-
-                await  self.aioredis.set("cot_status",1)
-                logger.info(f"Redis has been updated")
-
-            logger.info(f"Redis is already updated")
+            await self.insert_cot_redis(data_list)
+            logger.info("setup_redis: cot_ttf cache warmed from Postgres")
 
         except Exception as e:
+            # Log and swallow - do not propagate into main.py's lifespan.
             logger.error(f"Error setting up redis: {e}", exc_info=True)
-            raise
 
     # Trader categories scored for positioning, each as (long_field, short_field).
     # `asset_mgr` is the institutional / "real money" bucket - the headline here;
