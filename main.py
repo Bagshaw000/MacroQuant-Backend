@@ -45,28 +45,14 @@ nats_router = NatsRouter("nats://localhost:4222/")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    
-   
+    # The API only READS the Redis cache. Populating it (Postgres -> Redis,
+    # external APIs -> Redis) is the WORKER's job - see src/worker.py, where
+    # the warm-up jobs run at worker startup and on a cron. Doing it here too
+    # meant it ran once per uvicorn worker (--workers N), racing writes, and
+    # a Redis/Postgres hiccup could abort API startup entirely.
     await nats_router.startup()
-    await cot_ctrl.setup_redis()
-    
-    # 3. Data loading (concurrent with error handling)
-    results = await asyncio.gather(
-        macro_ctrl.refresh_factor_stats(),
-        market_overview.get_currency(),
-        lse_ctrl.get_event_cal(),
-        cot_ctrl.ensure_positioning(),
-        cross_sec.update_quandrant(),
-        return_exceptions=True
-    )
-    
-    await asyncio.gather(macro_ctrl.get_global_cycle())
-    
-    # 4. Log failures but continue
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error("Startup task failed: %s", result, exc_info=result)
-    
+    logger.info("API startup complete - cache is populated by the arq worker")
+
     yield
     await nats_router.shutdown()
     # await cot_ctrl.shutdown()

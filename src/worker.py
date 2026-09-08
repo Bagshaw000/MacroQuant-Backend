@@ -81,6 +81,14 @@ cross_section_ctrl = CrossSectionController()
 # dict (job context - not used by any of these), and the function's job is
 # just to delegate to the matching controller/model and log completion.
 
+async def warm_cot_cache(ctx):
+    # Populate cot_ttf:* in Redis from whatever is already in Postgres. Cheap
+    # no-op once the keys are present (setup_redis SCANs first). This is what
+    # refills the cache after a Redis flush / fresh deploy without waiting for
+    # the Wednesday cot_update sync.
+    await cot_ctrl.setup_redis()
+    logger.info("Ran cot_ttf cache warm-up")
+
 async def cot_update(ctx):
     await cot_model.update_cot()
     # print("Running")
@@ -146,43 +154,49 @@ class WorkerSettings:
 
     on_startup = on_startup
 
+    # NOTE on run_at_startup: every job that POPULATES a durable cache runs
+    # once when the worker boots, so a fresh deploy / flushed Redis is refilled
+    # within minutes instead of waiting for the job's scheduled day. arq
+    # enqueues them as normal jobs (parallel, retried, unique-deduped), so this
+    # doesn't block the worker. The two exceptions - cot_update and
+    # full_cot_positioning - stay False because they're heavy (a full CFTC sync
+    # / hundreds of rate-limited LLM calls); the cache still comes up via
+    # warm_cot_cache + curated_cot_positioning.
     cron_jobs = [
+        # On startup + every ~4 hours: refill cot_ttf:* from Postgres if empty.
+        cron(warm_cot_cache, hour={0, 4, 8, 12, 16, 20}, minute=15, unique=True,
+            run_at_startup=True),
         # Every Wednesday at 23:00 - weekly CFTC COT reports are typically
-        # released Friday afternoons (for the prior Tuesday's data), so this
-        # actually reflects data current as of ~1 week earlier than a
-        # Friday run would; unique=True prevents overlapping runs if one is
-        # still in progress, run_at_startup=False means it won't fire
-        # immediately when the worker process starts.
+        # released Friday afternoons (for the prior Tuesday's data). Heavy full
+        # sync, so it does NOT run at startup - warm_cot_cache covers the cache.
         cron(cot_update,  weekday="wed", hour=23, unique=True,
             run_at_startup=False),
-        # Every day at 05:00.
+        # Every day at 05:00, and on startup (repopulates overview:currency:*).
         cron(currency_snapshot, hour=5 , minute=0,
             unique=True,
-            run_at_startup=False),
-        # Every Saturday at 23:00.
+            run_at_startup=True),
+        # Every Saturday at 23:00, and on startup (repopulates news:* events).
         cron(get_events,weekday='sat', hour=23, unique=True,
-            run_at_startup=False),
+            run_at_startup=True),
         # On the 1st, 5th, 10th, 15th, 20th, 25th, and 30th of every month at
-        # 23:00 (roughly every 5 days, catching most monthly release dates).
+        # 23:00, and on startup - get_event_cal now also rebuilds the LSE
+        # {table}:{country} / {table}:avg cache from Postgres every run.
         cron(get_lse,day={1, 5, 10, 15, 20, 25, 30}, hour=23, unique=True,
-            run_at_startup=False),
+            run_at_startup=True),
         # Every 3 hours (00/03/06/09/12/15/18/21), on the hour.
         # No unique/run_at_startup override, so this uses arq's defaults
         # (unique=True, run_at_startup=True) unlike the other jobs above.
         cron(get_new_sentiment, hour={0, 3, 6, 9, 12, 15, 18, 21},  # Every 3rd hour of the day
             minute=0 ),
-        # Every Sunday at 22:00 - trailing (mu, sigma) stats barely move
-        # between individual releases, so a weekly refresh keeps the cache
-        # (see controller/macro.py's STATS_TTL) well ahead of its 9-day
-        # expiry without hitting Postgres on every economic-cycle read.
+        # Every Sunday at 22:00, and on startup - trailing (mu, sigma) stats
+        # have a 9-day TTL (STATS_TTL), so without a startup run a deploy after
+        # a wipe leaves {table}:stats:* empty until the next Sunday.
         cron(refresh_factor_stats, weekday="sun", hour=22, unique=True,
-            run_at_startup=False),
-        # 1st of every month at 22:30 - PPI->CPI lead is a structural read
-        # meant to be stable (see cross_section.py's module docstring on
-        # why it's estimated once and cached, not re-fit live), so a
-        # monthly cadence is plenty, well ahead of LEAD_TTL's 40-day expiry.
+            run_at_startup=True),
+        # 1st/10th/15th/20th/25th at 22:30, and on startup - cross_section:*
+        # has a 40-day TTL; a startup run keeps it populated after a deploy.
         cron(refresh_cross_section, day={1, 10, 15, 20, 25}, hour=22, minute=30, unique=True,
-            run_at_startup=False),
+            run_at_startup=True),
         # Every Sunday at 01:00 - a few days after cot_update has synced the new
         # weekly report, so the long-tail positioning (full_positioning: every
         # non-curated cot_ttf instrument, with an LLM breakdown each) is scored
@@ -190,13 +204,13 @@ class WorkerSettings:
         # overnight. Writes cot_pos:_meta_all; never touches cot_pos:_meta.
         cron(full_cot_positioning, weekday="sun", hour=1, unique=True,
             run_at_startup=False),
-        # Every Saturday at 00:30 - ahead of the full sweep above. Rescores the
-        # curated COT_CURATED_ASSETS shortlist and rewrites cot_pos:_meta + its
-        # blobs (each with an LLM summary). Only ~11 instruments, so this is
-        # quick. This is the job that keeps the startup snapshot
-        # (ensure_positioning) fresh while the app runs.
+        # Every Saturday at 00:30, and on startup - rescores the curated
+        # COT_CURATED_ASSETS shortlist and rewrites cot_pos:_meta + its blobs
+        # (~11 instruments, each with an LLM summary). cot_pos:* has a 30-day
+        # TTL; the startup run repopulates it after a deploy. Depends on
+        # cot_ttf:* being present, so it is ordered after warm_cot_cache above.
         cron(curated_cot_positioning, weekday="sat", hour=0, minute=30, unique=True,
-            run_at_startup=False),
+            run_at_startup=True),
     ]
 
     # Redis instance arq itself uses to store/dispatch jobs - separate from

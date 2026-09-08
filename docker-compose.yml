@@ -58,7 +58,11 @@ services:
 
   redis:
     image: redis:8.4
-    command: redis-server --save 60 1 --loglevel warning
+    # RDB snapshots for restart-persistence. stop-writes-on-bgsave-error no:
+    # if a snapshot fails (e.g. disk full), keep accepting writes instead of
+    # rejecting them app-wide - this is a rebuildable cache, so a missed
+    # snapshot is recoverable while an outage is not.
+    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning
     container_name: redis
     ports:
       - "6379:6379"
