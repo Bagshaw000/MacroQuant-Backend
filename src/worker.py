@@ -162,6 +162,12 @@ class WorkerSettings:
     # full_cot_positioning - stay False because they're heavy (a full CFTC sync
     # / hundreds of rate-limited LLM calls); the cache still comes up via
     # warm_cot_cache + curated_cot_positioning.
+    #
+    # NOTE on minute=: arq's cron() treats an unset field as "every value", so
+    # `cron(fn, hour=23)` with NO minute fires the job every minute from 23:00
+    # to 23:59 - 60 runs, and unique= does NOT dedupe across minutes because
+    # each minute is a distinct scheduled slot. Every job below therefore
+    # pins an explicit minute.
     cron_jobs = [
         # On startup + every ~4 hours: refill cot_ttf:* from Postgres if empty.
         cron(warm_cot_cache, hour={0, 4, 8, 12, 16, 20}, minute=15, unique=True,
@@ -169,19 +175,19 @@ class WorkerSettings:
         # Every Wednesday at 23:00 - weekly CFTC COT reports are typically
         # released Friday afternoons (for the prior Tuesday's data). Heavy full
         # sync, so it does NOT run at startup - warm_cot_cache covers the cache.
-        cron(cot_update,  weekday="wed", hour=23, unique=True,
+        cron(cot_update,  weekday="wed", hour=23, minute=0, unique=True,
             run_at_startup=False),
         # Every day at 05:00, and on startup (repopulates overview:currency:*).
         cron(currency_snapshot, hour=5 , minute=0,
             unique=True,
             run_at_startup=True),
         # Every Saturday at 23:00, and on startup (repopulates news:* events).
-        cron(get_events,weekday='sat', hour=23, unique=True,
+        cron(get_events,weekday='sat', hour=23, minute=0, unique=True,
             run_at_startup=True),
         # On the 1st, 5th, 10th, 15th, 20th, 25th, and 30th of every month at
         # 23:00, and on startup - get_event_cal now also rebuilds the LSE
         # {table}:{country} / {table}:avg cache from Postgres every run.
-        cron(get_lse,day={1, 5, 10, 15, 20, 25, 30}, hour=23, unique=True,
+        cron(get_lse,day={1, 5, 10, 15, 20, 25, 30}, hour=23, minute=0, unique=True,
             run_at_startup=True),
         # Every 3 hours (00/03/06/09/12/15/18/21), on the hour.
         # No unique/run_at_startup override, so this uses arq's defaults
@@ -191,7 +197,7 @@ class WorkerSettings:
         # Every Sunday at 22:00, and on startup - trailing (mu, sigma) stats
         # have a 9-day TTL (STATS_TTL), so without a startup run a deploy after
         # a wipe leaves {table}:stats:* empty until the next Sunday.
-        cron(refresh_factor_stats, weekday="sun", hour=22, unique=True,
+        cron(refresh_factor_stats, weekday="sun", hour=22, minute=0, unique=True,
             run_at_startup=True),
         # 1st/10th/15th/20th/25th at 22:30, and on startup - cross_section:*
         # has a 40-day TTL; a startup run keeps it populated after a deploy.
@@ -202,7 +208,7 @@ class WorkerSettings:
         # non-curated cot_ttf instrument, with an LLM breakdown each) is scored
         # against fresh data. Slow (hundreds of rate-limited LLM calls); runs
         # overnight. Writes cot_pos:_meta_all; never touches cot_pos:_meta.
-        cron(full_cot_positioning, weekday="sun", hour=1, unique=True,
+        cron(full_cot_positioning, weekday="sun", hour=1, minute=0, unique=True,
             run_at_startup=False),
         # Every Saturday at 00:30, and on startup - rescores the curated
         # COT_CURATED_ASSETS shortlist and rewrites cot_pos:_meta + its blobs

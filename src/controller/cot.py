@@ -388,34 +388,58 @@ class COTController:
 
 
 
+    # A healthy cot_ttf:* cache is thousands of hashes (every instrument in
+    # cot_ttf x up to 60 weekly reports). This floor sits well above the
+    # residue that can survive in a reloaded RDB (a few dozen keys) and well
+    # below a full cache, so it cleanly distinguishes "degraded" from "warm".
+    _COT_TTF_WARM_FLOOR = 500
+
     # This warms the cot_ttf:* Redis cache from Postgres on startup.
     async def setup_redis(self):
-        """Warm the `cot_ttf:*` Redis cache from Postgres when it is empty.
+        """Warm the `cot_ttf:*` Redis cache from Postgres when it is empty
+        OR degraded.
 
-        Idempotent, and gated on the ACTUAL presence of keys (a SCAN) rather
-        than a sticky "done" flag - so it also self-heals after the keys
-        expire (60-week TTL), get evicted, or Redis is flushed. It never
-        deletes anything: insert_cot_redis overwrites by key, and old rows age
-        out on their own TTL.
+        Gated on an approximate key COUNT, not merely "does one key exist".
+        The earlier "first hit -> skip" check was defeated by its own
+        leftovers: after a deploy Redis reloads an RDB that still holds a
+        handful of un-expired cot_ttf keys, the SCAN finds one, declares the
+        cache populated, and the real Postgres->Redis warm never runs - so the
+        cache stayed permanently stuck near-empty. Counting to a floor fixes
+        that while still skipping the warm when the cache is genuinely full.
 
-        Never raises - a cold cache should not take down API startup. The
-        weekly `cot_update` cron and the lazy per-instrument fetches recover
+        Self-heals after TTL expiry (60-week), eviction, or a flush. Never
+        deletes: insert_cot_redis overwrites by key and old rows age out on
+        their own TTL. Never raises - a cold cache must not take down startup;
+        the weekly `cot_update` cron and lazy per-instrument fetches recover
         whatever this misses.
         """
         try:
-            # SCAN (non-blocking), stop at the first hit - we only need to
-            # know whether ANY cot_ttf key exists.
-            async for _ in self.aioredis.scan_iter(match="cot_ttf:*", count=1):
-                logger.info("cot_ttf cache already populated - skipping warm-up")
-                return
+            # SCAN (non-blocking) and count up to the floor - stop early once
+            # we know the cache is healthy so a full cache costs only ~1 pass.
+            seen = 0
+            async for _ in self.aioredis.scan_iter(match="cot_ttf:*", count=1000):
+                seen += 1
+                if seen >= self._COT_TTF_WARM_FLOOR:
+                    logger.info(
+                        "cot_ttf cache healthy (>= %d keys) - skipping warm-up",
+                        self._COT_TTF_WARM_FLOOR,
+                    )
+                    return
 
+            logger.info(
+                "cot_ttf cache degraded (%d keys < %d floor) - warming from Postgres",
+                seen, self._COT_TTF_WARM_FLOOR,
+            )
             data_list = await self.cot.get_all_last_year_cot()
             if not data_list:
                 logger.warning("setup_redis: Postgres returned no COT rows to cache")
                 return
 
             await self.insert_cot_redis(data_list)
-            logger.info("setup_redis: cot_ttf cache warmed from Postgres")
+            logger.info(
+                "setup_redis: cot_ttf cache warmed from Postgres (%d rows)",
+                len(data_list),
+            )
 
         except Exception as e:
             # Log and swallow - do not propagate into main.py's lifespan.
