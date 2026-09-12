@@ -73,7 +73,15 @@ services:
     # if REDIS_PASSWORD is unset - an empty substitution here would vanish
     # from the command line and shift --rename-command into --requirepass's
     # argument slot, corrupting the whole command instead of failing loudly.
-    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD (same value as the Doppler secret) before starting redis} --rename-command CONFIG "" --rename-command FLUSHALL "" --rename-command FLUSHDB ""
+    #
+    # NO --rename-command CONFIG "": the redis:8.x image auto-loads bundled
+    # modules (RediSearch among them) at startup, and RediSearch's own init
+    # calls CONFIG GET internally via RM_Call. Renaming CONFIG away makes that
+    # internal call return NULL, which the module dereferences unchecked ->
+    # SIGSEGV during moduleLoad, every single startup, before Redis ever opens
+    # its port - a permanent crash loop, not a one-off. FLUSHALL/FLUSHDB are
+    # not used by module init and stay disabled safely.
+    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD (same value as the Doppler secret) before starting redis} --rename-command FLUSHALL "" --rename-command FLUSHDB ""
     container_name: redis
     # REDIS_PASSWORD is only needed here so the healthcheck below can
     # authenticate - redis-server itself gets it from `command:` above.
