@@ -62,10 +62,10 @@ services:
     # if a snapshot fails (e.g. disk full), keep accepting writes instead of
     # rejecting them app-wide - this is a rebuildable cache, so a missed
     # snapshot is recoverable while an outage is not.
-    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning
+    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning --requirepass ${REDIS_PASSWORD} --rename-command CONFIG "" --rename-command FLUSHALL "" --rename-command FLUSHDB ""
     container_name: redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     networks:
