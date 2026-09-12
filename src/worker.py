@@ -42,6 +42,7 @@ from controller.news import NewsSentimentController
 # from controller.cross_section import CrossSectionController
 from controller.lse_ import LSEController
 from logging_config import configure_logging
+from database.redis_ import REDIS_HOST, REDIS_PASSWORD
 
 try:
     # Check if a loop already exists
@@ -220,6 +221,9 @@ class WorkerSettings:
     ]
 
     # Redis instance arq itself uses to store/dispatch jobs - separate from
-    # RedisConnection (database/redis_.py) used by the app's own data cache.
-    redis_settings = RedisSettings(host='redis')
+    # RedisConnection (database/redis_.py) used by the app's own data cache,
+    # but the same physical Redis - so if requirepass is set, arq needs the
+    # same password or it can't dequeue jobs at all. Reuses REDIS_HOST /
+    # REDIS_PASSWORD from database/redis_.py rather than re-deriving them.
+    redis_settings = RedisSettings(host=REDIS_HOST, password=REDIS_PASSWORD)
 

@@ -24,4 +24,4 @@ class ConfigType(BaseModel):
     news_token: str           # marketaux token (controller/news.py)
     lse_key: str              # LSE economic-calendar API key
     modelrail_key: str        # ModelRail LLM API key (controller/llm.py)
-    
+    redis_password: str       # Redis AUTH password (set REDIS_PASSWORD in Doppler)

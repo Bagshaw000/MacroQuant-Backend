@@ -24,13 +24,23 @@ builds a fresh ConnectionPool on every call. Only the async side is pooled.
 """
 
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import redis
 import redis.asyncio as aioredis
+from config.config import get_doppler_env
 
 # 'localhost' for running outside docker (a local Redis, or `docker compose up
 # redis` with port 6379 published). Set REDIS_HOST=redis inside docker-compose
 # so it resolves to the service.
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+
+# $REDIS_PASSWORD (compose/.env) wins so ops can rotate it without touching
+# Doppler; falls back to the Doppler secret; None if Redis has no requirepass
+# (get_doppler_env() itself can return None on a Doppler load failure, hence
+# the getattr guard - a passwordless Redis must not become a startup crash).
+_secrets = get_doppler_env()
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or getattr(_secrets, "redis_password", None)
 
 # Fail a dead connection in seconds, not by hanging or recursing.
 _SOCKET_CONNECT_TIMEOUT = 5
@@ -49,6 +59,7 @@ class RedisConnection:
         if self.pool_instance is None:
             redis_pool = redis.ConnectionPool( host=REDIS_HOST,
                 port=6379,
+                password=REDIS_PASSWORD,
                 db=0,
                 max_connections=50,
                 decode_responses=True,
@@ -69,6 +80,7 @@ class RedisConnection:
                 host=REDIS_HOST,
                 port=6379,
                 db=0,
+                password=REDIS_PASSWORD,
                 max_connections=50,
                 decode_responses=True,
                 retry_on_timeout=True,

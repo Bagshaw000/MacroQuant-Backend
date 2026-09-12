@@ -20,6 +20,12 @@ services:
       - DOPPLER_TOKEN=${DOPPLER_TOKEN}
       # Redis is a separate container on the compose network, not localhost.
       - REDIS_HOST=redis
+      # Same value passed to the redis service's --requirepass above, from the
+      # same host .env - the single source of truth, so this can never drift
+      # from what Redis actually requires (Doppler's REDIS_PASSWORD, read as a
+      # fallback in database/redis_.py, is a second copy that must be kept in
+      # sync manually; this env var takes priority and avoids relying on that).
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?}
       # Opt-in file logging. This path is inside the ./logs:/app/log mount and
       # OUTSIDE the app source, so it never triggers a --reload loop.
       - LOG_FILE=/app/log/app.log
@@ -62,8 +68,17 @@ services:
     # if a snapshot fails (e.g. disk full), keep accepting writes instead of
     # rejecting them app-wide - this is a rebuildable cache, so a missed
     # snapshot is recoverable while an outage is not.
-    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning --requirepass ${REDIS_PASSWORD} --rename-command CONFIG "" --rename-command FLUSHALL "" --rename-command FLUSHDB ""
+    #
+    # :? (not a plain substitution) makes `docker compose up` refuse to start
+    # if REDIS_PASSWORD is unset - an empty substitution here would vanish
+    # from the command line and shift --rename-command into --requirepass's
+    # argument slot, corrupting the whole command instead of failing loudly.
+    command: redis-server --save 60 1 --stop-writes-on-bgsave-error no --loglevel warning --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD (same value as the Doppler secret) before starting redis} --rename-command CONFIG "" --rename-command FLUSHALL "" --rename-command FLUSHDB ""
     container_name: redis
+    # REDIS_PASSWORD is only needed here so the healthcheck below can
+    # authenticate - redis-server itself gets it from `command:` above.
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -71,7 +86,10 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # requirepass means a bare `redis-cli ping` now fails with NOAUTH, which
+      # would permanently fail this healthcheck and block macro/worker startup
+      # (they depend_on: condition: service_healthy).
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -88,6 +106,8 @@ services:
     environment:
       - DOPPLER_TOKEN=${DOPPLER_TOKEN}
       - REDIS_HOST=redis
+      # See the matching comment on the macro service above.
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?}
       - LOG_FILE=/app/log/worker.log
 
     depends_on:

@@ -34,7 +34,12 @@ def doppler_secret()->ConfigType:
         
         doppler = DopplerSDK()
         doppler.set_access_token(token)
-        
+
+        # Optional - unlike every other secret above, REDIS_PASSWORD may not
+        # exist in Doppler yet (Redis without requirepass is a valid setup),
+        # so a missing secret here must not take down the whole config load.
+   
+
         return ConfigType(
             supabase_key= doppler.secrets.get(project="tpf_macro", config="dev",name="SUPABASE_KEY").value['raw'],
             supabase_url =  doppler.secrets.get(project="tpf_macro", config="dev",name="SUPABASE_URL").value['raw'],
@@ -50,6 +55,7 @@ def doppler_secret()->ConfigType:
             news_token = doppler.secrets.get(project="tpf_macro", config="dev", name="NEWS_TOKEN").value['raw'],
             lse_key=doppler.secrets.get(project="tpf_macro", config="dev", name="LSE_KEY").value['raw'],
             modelrail_key=doppler.secrets.get(project="tpf_macro", config="dev", name="MODELRAIL_KEY").value['raw'],
+            redis_password=doppler.secrets.get(project="tpf_macro", config="dev", name="REDIS_PASSWORD").value['raw'],
         )
         
         
